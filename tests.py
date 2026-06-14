@@ -1,11 +1,11 @@
 import io
 
+import markdown
 import pytest
 from fastapi.testclient import TestClient
 from starlette import status
 
 from main import app
-from schema import SavedNotes
 
 client = TestClient(app)
 
@@ -54,6 +54,7 @@ function toggleTheme(theme) {
 > [!NOTE]
 > Ensure all image assets are fully optimized using modern WebP formats before uploading them to the server.
 """
+MD_content_str = MD_content.decode()
 
 error_responses = {
     "Invalid Markdown": {"status": "error", "detail": "File must be a markdown file."},
@@ -61,15 +62,26 @@ error_responses = {
         "status": "error",
         "detail": "Trouble decoding markdown file, try using UTF-8 compliant characters.",
     },
+    "No File": {"status": "error", "detail": "File does not exist"},
 }
 
 
 @pytest.fixture
 def temp_markdown_file(tmp_path, monkeypatch):
-    """Changes Markdown directory from markdown_dir to tmp_path"""
+    """Changes Markdown directory from markdown_dir to tmp_path for testing"""
     monkeypatch.setattr("main.markdown_dir", tmp_path)
 
     return tmp_path
+
+
+@pytest.fixture
+def mock_language_tool(mocker):
+    """Mocks the language tool grammar checker"""
+    mock_tool = mocker.MagicMock()
+    mock_tool.check.return_value = []
+    mocker.patch.dict("main.tools", {"language_tool": mock_tool})
+
+    return mock_tool
 
 
 def test_check_endpoint_rejects_non_markdown_files():
@@ -86,34 +98,34 @@ def test_check_endpoint_rejects_non_markdown_files():
     assert response.json() == error_responses["Invalid Markdown"]
 
 
-def test_check_endpoint_accepts_markdown_file(mocker):
+def test_check_endpoint_accepts_markdown_file(mock_language_tool):
     file_name = "README.md"
     content_type = "text/markdown"
     mock_file = io.BytesIO(b"Idk")
-
-    mock_tool = mocker.MagicMock()
-    mock_tool.check.return_value = []
-    mocker.patch.dict("main.tools", {"language_tool": mock_tool})
 
     response = client.post(
         "/check", files={"file": (file_name, mock_file, content_type)}
     )
 
-    mock_tool.check.assert_called_once()
+    mock_language_tool.check.assert_called_once()
     assert response.status_code == status.HTTP_200_OK
     assert response.json() != error_responses["Invalid Markdown"]
 
 
+def test_check_endpoint_returns_an_error_with_no_file(mock_language_tool):
+    response = client.post("/check")
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+
 def test_save_endpoint_with_valid_input(temp_markdown_file):
-    # Replaces the top-level markdown_dir with tmp_path
-    MD_content_str = MD_content.decode()
     MD_content_hash = abs(hash(MD_content_str))
 
     response = client.post("/save", content=MD_content_str)
 
     assert len(list(temp_markdown_file.iterdir())) == 1
     assert response.status_code == status.HTTP_200_OK
-    assert response.json() == {"filename": MD_content_hash}
+    assert response.json() == {"file_name": MD_content_hash}
 
 
 def test_save_endpoint_with_empty_input(temp_markdown_file):
@@ -135,14 +147,14 @@ def test_save_endpoint_with_non_utf8_characters(temp_markdown_file):
     assert response.json() == error_responses["Decode Error"]
 
 
-def test_notes_endpoint_with_no_saved_notes(temp_markdown_file):
+def test_note_endpoint_with_no_saved_notes(temp_markdown_file):
     response = client.get("/notes")
 
     assert response.json() == {"detail": "No notes saved yet..."}
     assert response.status_code == status.HTTP_200_OK
 
 
-def test_notes_endpoint_with_saved_notes(temp_markdown_file):
+def test_note_endpoint_with_saved_notes(temp_markdown_file):
     # Create a fake file in the tmp_dir
     filename = "random.MD"
     md = temp_markdown_file / filename
@@ -151,9 +163,44 @@ def test_notes_endpoint_with_saved_notes(temp_markdown_file):
     notes = {"name": filename}
     count = 1
 
-    print(f"Notes: {notes}")
     response = client.get("/notes")
-    print(f"JSON response: {response.json()}")
 
     assert response.json() == {"count": count, "notes": [notes]}
     assert response.status_code == status.HTTP_200_OK
+
+
+def test_notes_filename_endpoint_returns_html_with_saved_file(temp_markdown_file):
+    filename = "README"
+    md_file = temp_markdown_file / f"{filename}.md"
+    md_file.write_text(MD_content_str)
+
+    with open(md_file) as f:
+        md = f.read()
+        html_md = markdown.markdown(md)
+
+    response = client.get(f"note/{filename}")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.text == html_md
+
+
+def test_notes_filename_endpoint_with_empty_markdown_file(temp_markdown_file):
+    filename = "Random"
+
+    md_file = temp_markdown_file / f"{filename}.md"
+    md_file.write_text("")
+
+    response = client.get(f"note/{filename}")
+    assert response.status_code == status.HTTP_200_OK
+    assert response.text == ""
+
+
+def test_notes_filename_endpoint_returns_an_error_with_a_file_that_does_not_exist(
+    temp_markdown_file,
+):
+    filename = "README"
+
+    response = client.get(f"note/{filename}")
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json() == error_responses["No File"]

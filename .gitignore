@@ -10,3 +10,5 @@ wheels/
 .venv
 
 checked_markdown_files
+.claude
+CLAUDE.md

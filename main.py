@@ -1,7 +1,7 @@
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, List
 
 import markdown
 from fastapi import Body, FastAPI, File, UploadFile, status
@@ -16,7 +16,8 @@ markdown_dir = Path.cwd() / "checked_markdown_files"
 tools = {}
 
 
-# Creates a directory for storing checked markdown files when api is started
+# Creates a directory for storing saved Markdown files when api is started
+# Also downloads the grammar checker to prevent bottlenecks
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -54,7 +55,7 @@ async def unicode_decode_error(request, exc: UnicodeDecodeError):
     )
 
 
-def is_markdown_file(file):
+def is_markdown_file(file) -> bool:
     md_pattern = r".*\.(md|markdown)$"
     if re.search(md_pattern, file.filename, re.IGNORECASE):
         return True
@@ -62,7 +63,7 @@ def is_markdown_file(file):
     return False
 
 
-def check_grammar(text):
+def check_grammar(text: str) -> List[dict[str, Any]]:
     language_tool: LanguageTool = tools["language_tool"]
     error_matches = language_tool.check(text)
 
@@ -95,15 +96,7 @@ async def grammar_checker(file: UploadFile = File(...)):
 
     md_content = await file.read()
     # convert from bytes to string
-    try:
-        md_content = md_content.decode()
-    except UnicodeDecodeError:
-        return JSONResponse(
-            {
-                "status": "error",
-                "detail": "Trouble decoding markdown file, try using UTF-8 compliant characters.",
-            }
-        )
+    md_content = md_content.decode()
 
     errors = check_grammar(md_content)
 
@@ -150,7 +143,10 @@ async def markdown_to_html(
 
         return HTMLResponse(html_str)
     except FileNotFoundError:
-        return JSONResponse({"status": "error", "detail": "File does not exist"})
+        return JSONResponse(
+            {"status": "error", "detail": "File does not exist"},
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
 
 
 if __name__ == "__main__":
